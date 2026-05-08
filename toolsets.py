@@ -301,6 +301,24 @@ TOOLSETS = {
         "tools": _HERMES_CORE_TOOLS,
         "includes": []
     },
+
+    "openstore_demo": {
+        "description": "OpenStore TG demo — simulated SP↔merchant A2A (Meowant + competitors, in-process catalog)",
+        "tools": ["openstore_a2a_demo"],
+        "includes": [],
+    },
+
+    "springbrand_catalog": {
+        "description": "Shared SpringBrand demo catalog database (frontend + Hermes use the same product source)",
+        "tools": ["springbrand_catalog"],
+        "includes": [],
+    },
+
+    "hermes-openstore-sp": {
+        "description": "Telegram OpenStore SP bot: hermes-telegram + openstore_demo (static A2A simulation)",
+        "tools": [],
+        "includes": ["hermes-telegram", "openstore_demo"],
+    },
     
     "hermes-discord": {
         "description": "Discord bot toolset - full access (terminal has safety checks via dangerous command approval)",

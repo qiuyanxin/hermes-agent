@@ -6,11 +6,33 @@
 # Dependencies
 node_modules
 .venv
+venv
 
 # CI/CD
 .github
 
 # Environment files
 .env
+
+# Python caches and test output
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+
+# Dev-only project content
+tests
+docs
+website
+ui-tui
+skills
+optional-skills
+environments
+nix
 
 *.md

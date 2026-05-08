@@ -17,6 +17,7 @@ from hermes_cli.commands import (
     _clamp_command_names,
     _clamp_telegram_names,
     _sanitize_telegram_name,
+    detect_telegram_menu_profile,
     discord_skill_commands,
     gateway_help_lines,
     resolve_command,
@@ -101,6 +102,7 @@ class TestResolveCommand:
         assert resolve_command("reset").name == "new"
         assert resolve_command("q").name == "queue"
         assert resolve_command("exit").name == "quit"
+        assert resolve_command("sp_buy").name == "sp-buy"
         assert resolve_command("gateway").name == "platforms"
         assert resolve_command("set-home").name == "sethome"
         assert resolve_command("reload_mcp").name == "reload-mcp"
@@ -229,6 +231,30 @@ class TestTelegramBotCommands:
             if cmd.cli_only and not cmd.gateway_config_gate:
                 tg_name = cmd.name.replace("-", "_")
                 assert tg_name not in names
+
+    def test_openstore_menu_profile_detected_from_telegram_config(self, tmp_path, monkeypatch):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("telegram:\n  command_profile: openstore\n")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        assert detect_telegram_menu_profile() == "openstore"
+
+    def test_openstore_menu_profile_detected_from_platform_toolsets(self, tmp_path, monkeypatch):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("platform_toolsets:\n  telegram:\n    - hermes-openstore-sp\n")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        assert detect_telegram_menu_profile() == "openstore"
+
+    def test_openstore_profile_uses_three_command_menu(self):
+        menu, hidden = telegram_menu_commands(max_commands=100, profile="openstore")
+
+        assert hidden == 0
+        assert menu == [
+            ("start", "Show the SpringBrand quick start"),
+            ("sp_buy", "Get direct product recommendations"),
+            ("sell", "Launch your store"),
+        ]
 
 
 class TestSlackSubcommandMap:

@@ -3235,6 +3235,11 @@ class GatewayRunner:
             if _cmd_def_inner and _cmd_def_inner.name == "background":
                 return await self._handle_background_command(event)
 
+            # /sp-buy is a fixed demo command that does not depend on the
+            # current agent state, so let it run immediately.
+            if _cmd_def_inner and _cmd_def_inner.name == "sp-buy":
+                return await self._handle_sp_buy_command(event)
+
             # Gateway-handled info/control commands with dedicated
             # running-agent handlers.
             if _cmd_def_inner and _cmd_def_inner.name in _DEDICATED_HANDLERS:
@@ -3354,6 +3359,12 @@ class GatewayRunner:
         
         if canonical == "help":
             return await self._handle_help_command(event)
+
+        if canonical == "start":
+            return await self._handle_start_command(event)
+
+        if canonical == "sp-buy":
+            return await self._handle_sp_buy_command(event)
 
         if canonical == "commands":
             return await self._handle_commands_command(event)
@@ -3484,6 +3495,20 @@ class GatewayRunner:
 
         if canonical == "voice":
             return await self._handle_voice_command(event)
+
+        if canonical == "buy":
+            buy_result = await self._handle_buy_command(event)
+            if buy_result is not None:
+                return buy_result
+            canonical = None
+            command = None
+
+        if canonical == "sell":
+            sell_result = await self._handle_sell_command(event)
+            if sell_result is not None:
+                return sell_result
+            canonical = None
+            command = None
 
         if self._draining:
             return f"⏳ Gateway is {self._status_action_gerund()} and is not accepting new work right now."
@@ -5159,6 +5184,264 @@ class GatewayRunner:
         except Exception:
             pass
         return "\n".join(lines)
+
+    async def _handle_start_command(self, event: MessageEvent) -> str:
+        """Handle /start for the SpringBrand Telegram flow."""
+        return (
+            "🛒 **SpringBrand**\n\n"
+            "Tell me what you want to buy or sell, and I will help you compare options, share product links, and guide the next step.\n\n"
+            "Use `/sp-buy <what you need>` for direct product recommendations with links.\n"
+            "Use `/buy <what you need>` for the normal AI shopping flow.\n"
+            "Use `/sell <what you sell>` to start seller onboarding and set up your store.\n\n"
+            "Examples:\n"
+            "`/sp-buy 性价比猫砂盆，除味，空间大，声音小`\n"
+            "`/sell I run a pet supplies brand and want a Telegram store`"
+        )
+
+    @staticmethod
+    def _format_openstore_demo_price(product: dict[str, Any]) -> str:
+        price_display = str(product.get("price_display") or "").strip()
+        if price_display:
+            return price_display
+        price_usd = product.get("price_usd")
+        if isinstance(price_usd, (int, float)):
+            return f"${price_usd:.2f}"
+        price = product.get("price_cny")
+        if isinstance(price, (int, float)):
+            return f"¥{int(price):,}"
+        return "价格待确认"
+
+    @staticmethod
+    def _format_openstore_demo_compare_price(product: dict[str, Any]) -> str:
+        compare_usd = product.get("compare_at_price_usd")
+        if isinstance(compare_usd, (int, float)):
+            return f"${compare_usd:.2f}"
+        return ""
+
+    @staticmethod
+    def _format_openstore_demo_product_name(product: dict[str, Any]) -> str:
+        return str(product.get("name_zh") or product.get("name") or "商品")
+
+    @classmethod
+    def _format_openstore_demo_spec_line(
+        cls,
+        product: dict[str, Any],
+        *,
+        limit: int = 4,
+        separator: str = " / ",
+    ) -> str:
+        specs = product.get("specifications") or []
+        spec_bits = []
+        for spec in specs[:limit]:
+            label = str(spec.get("label") or "").strip()
+            value = str(spec.get("value") or "").strip()
+            if label and value:
+                spec_bits.append(f"{label}: {value}")
+            elif value:
+                spec_bits.append(value)
+        if spec_bits:
+            return separator.join(spec_bits)
+        highlights = [str(bit).strip() for bit in (product.get("highlights") or []) if str(bit).strip()]
+        return separator.join(highlights[:limit])
+
+    @classmethod
+    def _format_openstore_demo_image_markdown(cls, product: dict[str, Any]) -> str:
+        image_url = str(product.get("image_url") or "").strip()
+        if not image_url:
+            return ""
+        caption_bits = [
+            cls._format_openstore_demo_product_name(product),
+            cls._format_openstore_demo_price(product),
+        ]
+        specs = product.get("specifications") or []
+        for spec in specs[:3]:
+            value = str(spec.get("value") or "").strip()
+            if value:
+                caption_bits.append(value)
+        alt_text = " | ".join(bit for bit in caption_bits if bit)
+        return f"![{alt_text}]({image_url})"
+
+    @classmethod
+    def _render_openstore_sp_buy_demo(cls, query: str, demo: dict[str, Any]) -> str:
+        """Render a user-facing response for the fixed OpenStore SP path."""
+        recommendation = demo.get("recommendation") or {}
+        recommended_products = recommendation.get("recommended_products") or []
+        meowant_spotlight = recommendation.get("meowant_spotlight_products") or []
+        primary_merchant = str(recommendation.get("primary_merchant") or "").strip()
+        feature_matches = recommendation.get("meowant_feature_matches") or []
+        comparison_rows = demo.get("simulated_fanout_to_merchant_agents") or []
+        request_summary = query.strip()
+        if len(request_summary) > 72:
+            request_summary = request_summary[:69].rstrip() + "..."
+
+        primary_row = next(
+            (
+                row for row in comparison_rows
+                if str(row.get("merchant_slug") or "").strip().lower() == primary_merchant
+            ),
+            comparison_rows[0] if comparison_rows else None,
+        )
+        primary_reply = (primary_row or {}).get("merchant_agent_reply") or {}
+        primary_candidates = primary_reply.get("candidate_products") or []
+        primary_product = primary_candidates[0] if primary_candidates else (
+            recommended_products[0] if recommended_products else {}
+        )
+        primary_display = (
+            str((primary_row or {}).get("merchant_display_name") or "").strip()
+            or primary_merchant.title()
+            or "商家"
+        )
+        top_match = feature_matches[0] if feature_matches else {}
+        query_lower = query.lower()
+        explicit_meowant = any(alias in query_lower for alias in ("meowant", "mewant", "喵万特"))
+        show_meowant_cards = bool(
+            meowant_spotlight
+            and any(product.get("image_url") for product in meowant_spotlight)
+            and (primary_merchant == "meowant" or feature_matches or explicit_meowant)
+        )
+
+        lines = [
+            f"按你的需求，我先筛了更贴近“{request_summary}”的商品。",
+        ]
+
+        if primary_product:
+            product_name = cls._format_openstore_demo_product_name(primary_product)
+            spec_line = cls._format_openstore_demo_spec_line(primary_product)
+            lines.extend(
+                [
+                    "",
+                    f"**首推：{product_name}**",
+                    f"品牌：{primary_display}",
+                ]
+            )
+            matched_terms = top_match.get("matched_terms") or []
+            if matched_terms:
+                lines.append(f"更匹配的点：{'、'.join(matched_terms[:4])}")
+            if spec_line:
+                lines.append(f"关键参数：{spec_line}")
+            highlights = " / ".join(primary_product.get("highlights", [])[:3])
+            if highlights:
+                lines.append(f"推荐理由：{highlights}")
+            lines.append(f"参考价：{cls._format_openstore_demo_price(primary_product)}")
+            compare_price = cls._format_openstore_demo_compare_price(primary_product)
+            if compare_price:
+                lines.append(f"原价参考：{compare_price}")
+            product_url = str(primary_product.get("product_url") or "").strip()
+            if product_url:
+                lines.append(f"商品链接：{product_url}")
+
+        if comparison_rows:
+            lines.extend(["", "**你可以一起对比这几款：**"])
+            for row in comparison_rows[:3]:
+                merchant_name = row.get("merchant_display_name", "Merchant")
+                reply = row.get("merchant_agent_reply") or {}
+                picks = reply.get("candidate_products") or []
+                policies = reply.get("policies_echo") or {}
+                lead = picks[0] if picks else {}
+                if not lead:
+                    continue
+                warranty = policies.get("warranty_months")
+                returns_days = policies.get("returns_days")
+                summary_bits = [cls._format_openstore_demo_price(lead)]
+                if warranty:
+                    summary_bits.append(f"{warranty} 个月保修")
+                if returns_days:
+                    summary_bits.append(f"{returns_days} 天退换")
+                lines.append(
+                    f"- {merchant_name} · {cls._format_openstore_demo_product_name(lead)} · {' · '.join(summary_bits)}"
+                )
+                spec_line = cls._format_openstore_demo_spec_line(lead, limit=3)
+                if spec_line:
+                    lines.append(f"  参数：{spec_line}")
+                highlights = " / ".join(lead.get("highlights", [])[:2])
+                if highlights:
+                    lines.append(f"  亮点：{highlights}")
+                product_url = str(lead.get("product_url") or "").strip()
+                if product_url:
+                    lines.append(f"  链接：{product_url}")
+
+        if show_meowant_cards:
+            lines.extend(
+                [
+                    "",
+                    "**Meowant 商品卡（官网快照）**",
+                    f"_已核验图片和参数，快照日期：2026-04-23_",
+                ]
+            )
+            for product in meowant_spotlight[:3]:
+                product_name = cls._format_openstore_demo_product_name(product)
+                product_url = str(product.get("product_url") or "").strip()
+                compare_price = cls._format_openstore_demo_compare_price(product)
+                spec_line = cls._format_openstore_demo_spec_line(product)
+                label = f"[{product_name}]({product_url})" if product_url else product_name
+                line = f"- {label} · {cls._format_openstore_demo_price(product)}"
+                if compare_price:
+                    line += f"（原价 {compare_price}）"
+                lines.append(line)
+                if spec_line:
+                    lines.append(f"  参数：{spec_line}")
+                image_markdown = cls._format_openstore_demo_image_markdown(product)
+                if image_markdown:
+                    lines.append(image_markdown)
+
+        if top_match and not primary_product:
+            lines.append(
+                f"更贴近你需求的方向是：{top_match.get('product_name', '商品')} "
+                f"（{', '.join(top_match.get('matched_terms', [])[:3])}）"
+            )
+
+        return "\n".join(lines)
+
+    async def _handle_sp_buy_command(self, event: MessageEvent) -> str:
+        """Handle /sp-buy via the fixed OpenStore demo channel."""
+        query = event.get_command_args().strip()
+        if not query:
+            return (
+                "Usage: `/sp-buy <what you need>`\n"
+                "Example: `/sp-buy 我想买个猫砂盆，优先 Meowant`"
+            )
+
+        try:
+            from tools.openstore_demo_catalog import simulate_sp_a2a_roundtrip
+
+            demo = simulate_sp_a2a_roundtrip(query)
+        except Exception as exc:
+            logger.exception("OpenStore SP demo command failed")
+            return f"SpringBrand shopping is unavailable right now: {exc}"
+
+        return self._render_openstore_sp_buy_demo(query, demo)
+
+    async def _handle_buy_command(self, event: MessageEvent) -> str | None:
+        """Rewrite /buy into a shopping-intent user turn."""
+        request = event.get_command_args().strip()
+        if not request:
+            return (
+                "Usage: `/buy <what you need>`\n"
+                "Example: `/buy I need an iPhone 15 under $800`"
+            )
+
+        event.text = (
+            "The user used SpringBrand's /buy command. Treat this as a shopping intent. "
+            "Help them search, compare options, and recommend the best match.\n\n"
+            f"Buyer request: {request}"
+        )
+        return None
+
+    async def _handle_sell_command(self, event: MessageEvent) -> str | None:
+        """Rewrite /sell into a seller-onboarding user turn."""
+        request = event.get_command_args().strip()
+        if not request:
+            return (
+                "Usage: `/sell <what you sell>`\n"
+                "Example: `/sell I run a pet supplies business and want to sell on Telegram`"
+            )
+
+        event.text = (
+            "The user used SpringBrand's /sell command. Treat this as a seller onboarding request. "
+            "Help them create a store, connect Telegram if relevant, and explain the next steps clearly.\n\n"
+            f"Seller request: {request}"
+        )
+        return None
 
     async def _handle_commands_command(self, event: MessageEvent) -> str:
         """Handle /commands [page] - paginated list of all commands and skills."""

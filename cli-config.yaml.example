@@ -574,9 +574,30 @@ agent:
 #   homeassistant: hermes-homeassistant  (same as telegram)
 #   qqbot:            hermes-qqbot            (same as telegram)
 #
+# -----------------------------------------------------------------------------
+# 接 Telegram（第一种方式：前台跑 Gateway，不用 systemd/launchd 服务）
+# -----------------------------------------------------------------------------
+# 1) 安装带 TG 的依赖（若尚未安装）：
+#      pip install -e ".[messaging]"
+# 2) 配置 Bot（推荐向导）：
+#      hermes gateway setup
+#    或手写 ~/.hermes/.env ：
+#      TELEGRAM_BOT_TOKEN=123456789:AA...   # @BotFather
+#      TELEGRAM_ALLOWED_USERS=123456789     # 数字 user id，逗号分隔多个
+# 3) 在本机终端前台启动（日志全在终端，Ctrl+C 停止；与文档 hermes gateway 等价）：
+#      cd <本仓库>
+#      source venv/bin/activate
+#      hermes gateway run
+#    简写：hermes gateway   （无子命令时默认即 run）
+# 4) 需要长期挂后台：tmux/screen，或 hermes gateway install 再 hermes gateway start
+# 详见：website/docs/user-guide/messaging/telegram.md
+# -----------------------------------------------------------------------------
+#
 platform_toolsets:
   cli: [hermes-cli]
   telegram: [hermes-telegram]
+  # OpenStore Springbrand demo bot (SP 意图撮合 + 伪 A2A 商家库): 改用下面一行替代 telegram 默认
+  # telegram: [hermes-openstore-sp]
   discord: [hermes-discord]
   whatsapp: [hermes-whatsapp]
   slack: [hermes-slack]

@@ -1,0 +1,43 @@
+app = "qiuyanxin-hermes-agent"
+primary_region = "nrt"
+kill_signal = "SIGTERM"
+kill_timeout = 120
+
+[build]
+dockerfile = "Dockerfile"
+
+[env]
+HERMES_HOME = "/opt/data"
+API_SERVER_ENABLED = "true"
+API_SERVER_HOST = "0.0.0.0"
+API_SERVER_PORT = "8642"
+API_SERVER_MODEL_NAME = "hermes-agent"
+
+[processes]
+app = "gateway run"
+
+[http_service]
+processes = ["app"]
+internal_port = 8642
+force_https = true
+auto_start_machines = true
+auto_stop_machines = "off"
+min_machines_running = 1
+
+  [[http_service.checks]]
+  interval = "15s"
+  timeout = "5s"
+  grace_period = "30s"
+  method = "GET"
+  path = "/health"
+
+[mounts]
+source = "hermes_data"
+destination = "/opt/data"
+snapshot_retention = 14
+
+[[vm]]
+size = "shared-cpu-1x"
+memory = "2gb"
+cpus = 1
+cpu_kind = "shared"

@@ -149,6 +149,14 @@ COMMAND_REGISTRY: list[CommandDef] = [
                "Tools & Skills", cli_only=True),
 
     # Info
+    CommandDef("start", "Show the SpringBrand quick start", "Info",
+               gateway_only=True),
+    CommandDef("sp-buy", "Get direct SpringBrand buying recommendations", "Info",
+               gateway_only=True, aliases=("sp_buy",), args_hint="[what you need]"),
+    CommandDef("buy", "Search products and buying options with SpringBrand", "Info",
+               gateway_only=True, args_hint="[what you need]"),
+    CommandDef("sell", "Start seller onboarding for a SpringBrand store", "Info",
+               gateway_only=True, args_hint="[what you sell]"),
     CommandDef("commands", "Browse all commands and skills (paginated)", "Info",
                gateway_only=True, args_hint="[page]"),
     CommandDef("help", "Show available commands", "Info"),
@@ -389,6 +397,51 @@ def telegram_bot_commands() -> list[tuple[str, str]]:
     return result
 
 
+_OPENSTORE_TELEGRAM_COMMANDS: tuple[tuple[str, str], ...] = (
+    ("start", "Show the SpringBrand quick start"),
+    ("sp_buy", "Get direct product recommendations"),
+    ("sell", "Launch your store"),
+)
+
+
+def detect_telegram_menu_profile(
+    config: Mapping[str, Any] | None = None,
+) -> str | None:
+    """Return a Telegram menu profile name, if one is configured.
+
+    ``telegram.command_profile: openstore`` forces the SpringBrand/OpenStore
+    menu. As a convenience, explicit Telegram platform toolsets that include
+    ``openstore_demo`` or ``hermes-openstore-sp`` also enable that menu.
+    """
+    cfg: Mapping[str, Any] = config if config is not None else {}
+    if config is None:
+        try:
+            from hermes_cli.config import load_config
+            cfg = load_config()
+        except Exception:
+            cfg = {}
+
+    telegram_cfg = cfg.get("telegram")
+    if isinstance(telegram_cfg, Mapping):
+        profile = str(
+            telegram_cfg.get("command_profile")
+            or telegram_cfg.get("menu_profile")
+            or ""
+        ).strip().lower()
+        if profile == "openstore":
+            return profile
+
+    platform_toolsets = cfg.get("platform_toolsets")
+    if isinstance(platform_toolsets, Mapping):
+        raw_toolsets = platform_toolsets.get("telegram")
+        if isinstance(raw_toolsets, list):
+            toolset_names = {str(name) for name in raw_toolsets}
+            if {"openstore_demo", "hermes-openstore-sp"} & toolset_names:
+                return "openstore"
+
+    return None
+
+
 _CMD_NAME_LIMIT = 32
 """Max command name length shared by Telegram and Discord."""
 
@@ -572,7 +625,11 @@ def _collect_gateway_skill_entries(
 # Platform-specific wrappers
 # ---------------------------------------------------------------------------
 
-def telegram_menu_commands(max_commands: int = 100) -> tuple[list[tuple[str, str]], int]:
+def telegram_menu_commands(
+    max_commands: int = 100,
+    *,
+    profile: str | None = None,
+) -> tuple[list[tuple[str, str]], int]:
     """Return Telegram menu commands capped to the Bot API limit.
 
     Priority order (higher priority = never bumped by overflow):
@@ -589,6 +646,12 @@ def telegram_menu_commands(max_commands: int = 100) -> tuple[list[tuple[str, str
         (menu_commands, hidden_count) where hidden_count is the number of
         skill commands omitted due to the cap.
     """
+    menu_profile = (profile or detect_telegram_menu_profile() or "").strip().lower()
+    if menu_profile == "openstore":
+        visible = list(_OPENSTORE_TELEGRAM_COMMANDS[:max_commands])
+        hidden = max(0, len(_OPENSTORE_TELEGRAM_COMMANDS) - len(visible))
+        return visible, hidden
+
     core_commands = list(telegram_bot_commands())
     reserved_names = {n for n, _ in core_commands}
     all_commands = list(core_commands)
