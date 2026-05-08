@@ -57,5 +57,8 @@ RUN uv venv && \
 # ---------- Runtime ----------
 ENV HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist
 ENV HERMES_HOME=/opt/data
-VOLUME [ "/opt/data" ]
+# VOLUME instruction removed for Railway compatibility — Railway disallows
+# Dockerfile-defined volumes (use Railway Volumes for persistence). For
+# stateless SpringBrand deployment (sessions / memory not persisted; thread
+# state lives in demo agent-backend's PG), no Railway Volume is needed.
 ENTRYPOINT [ "/opt/hermes/docker/entrypoint.sh" ]

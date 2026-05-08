@@ -53,9 +53,16 @@ if [ ! -f "$HERMES_HOME/.env" ]; then
     cp "$INSTALL_DIR/.env.example" "$HERMES_HOME/.env"
 fi
 
-# config.yaml
+# config.yaml — SpringBrand customization: prefer springbrand-config.yaml
+# (with platform_toolsets.api_server: [springbrand_supost] etc.) over the
+# upstream cli-config.yaml.example default. Falls back to upstream example
+# when springbrand-config.yaml is absent (e.g. running on plain hermes-agent).
 if [ ! -f "$HERMES_HOME/config.yaml" ]; then
-    cp "$INSTALL_DIR/cli-config.yaml.example" "$HERMES_HOME/config.yaml"
+    if [ -f "$INSTALL_DIR/springbrand-config.yaml" ]; then
+        cp "$INSTALL_DIR/springbrand-config.yaml" "$HERMES_HOME/config.yaml"
+    else
+        cp "$INSTALL_DIR/cli-config.yaml.example" "$HERMES_HOME/config.yaml"
+    fi
 fi
 
 # SOUL.md
