@@ -517,6 +517,8 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_progress_callback=None,
         tool_start_callback=None,
         tool_complete_callback=None,
+        model_override: Optional[str] = None,
+        enabled_toolsets_override: Optional[List[str]] = None,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -525,16 +527,32 @@ class APIServerAdapter(BasePlatformAdapter):
         base_url, etc. from config.yaml / env vars.  Toolsets are resolved
         from config.yaml platform_toolsets.api_server (same as all other
         gateway platforms), falling back to the hermes-api-server default.
+
+        Per-request overrides:
+            model_override:            wins over _resolve_gateway_model().
+                                       Already supported on /v1/chat/completions
+                                       and /v1/responses; this brings parity to
+                                       /v1/runs (matches the SpringBrand
+                                       agent_profile pattern where each demo
+                                       agent_id picks its own model).
+            enabled_toolsets_override: replaces the platform_toolsets.api_server
+                                       global config for THIS run. Empty list
+                                       means "no toolsets" (an agent that only
+                                       converses); None means "use the global
+                                       default".
         """
         from run_agent import AIAgent
         from gateway.run import _resolve_runtime_agent_kwargs, _resolve_gateway_model, _load_gateway_config
         from hermes_cli.tools_config import _get_platform_tools
 
         runtime_kwargs = _resolve_runtime_agent_kwargs()
-        model = _resolve_gateway_model()
+        model = model_override or _resolve_gateway_model()
 
-        user_config = _load_gateway_config()
-        enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
+        if enabled_toolsets_override is not None:
+            enabled_toolsets = sorted(enabled_toolsets_override)
+        else:
+            user_config = _load_gateway_config()
+            enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
 
         max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
 
@@ -2134,6 +2152,17 @@ class APIServerAdapter(BasePlatformAdapter):
 
         instructions = body.get("instructions")
         previous_response_id = body.get("previous_response_id")
+        # Per-request agent profile overrides. Match the per-request semantics
+        # already supported on /v1/chat/completions + /v1/responses; this
+        # brings parity to /v1/runs so SpringBrand-style agent_profiles can
+        # pass enabled_toolsets/model per agent_id without restarting Hermes.
+        run_model_override = body.get("model")
+        run_toolsets_override = body.get("enabled_toolsets")
+        if run_toolsets_override is not None and not isinstance(run_toolsets_override, list):
+            return web.json_response(
+                _openai_error("'enabled_toolsets' must be a list of strings"),
+                status=400,
+            )
 
         # Accept explicit conversation_history from the request body.
         # Precedence: explicit conversation_history > previous_response_id.
@@ -2189,6 +2218,8 @@ class APIServerAdapter(BasePlatformAdapter):
                     session_id=session_id,
                     stream_delta_callback=_text_cb,
                     tool_progress_callback=event_cb,
+                    model_override=run_model_override,
+                    enabled_toolsets_override=run_toolsets_override,
                 )
                 def _run_sync():
                     # Mirror the chat-completions path: pass session_id as

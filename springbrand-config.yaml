@@ -10,19 +10,28 @@
 #
 # Wire:
 #   demo agent-backend → POST /v1/runs (this Hermes daemon, via API server
-#   platform) → springbrand_supost tool → supost-adapter → supost.com
+#   platform) → springbrand_* tools → adapter / demo internal endpoints
+#
+# Per-agent toolset selection:
+#   /v1/runs body now accepts `enabled_toolsets: [...]` (api_server.py patch)
+#   so demo's executeBuyerAgentViaHermes can pick a SUBSET of the global
+#   list below per agent_id (springbrand-supost-concierge gets
+#   ["springbrand_supost", "skills"], springbrand-medusa-buyer gets
+#   ["springbrand_medusa", "skills"], etc). The platform_toolsets list
+#   here is the SUPERSET — anything outside it is hard-blocked.
 
 model:
   provider: openrouter
   default: openai/gpt-4.1-mini
   base_url: https://openrouter.ai/api/v1
 
-# API server platform exposes ONLY the SUpost concierge tool to LLM. We
-# intentionally drop hermes-api-server's default toolset (web/terminal/
-# browser/file write) — buyer concierge runs in production where shell
-# access is unwanted and the LLM should focus on the supost decision flow.
-# To extend with more business tools (medusa, etc.) add them to this list
-# and import the matching tools/*_tool.py module.
+# API server platform exposes only the SpringBrand business tools + the
+# Anthropic-style skills hub (so LLM can dynamically load SKILL.md from
+# skills/ directory). We intentionally drop hermes-api-server's default
+# toolset (web/terminal/browser/file write) — buyer concierge runs in
+# production where shell access is unwanted.
 platform_toolsets:
   api_server:
     - springbrand_supost
+    - springbrand_medusa
+    - skills
