@@ -2017,10 +2017,15 @@ class APIServerAdapter(BasePlatformAdapter):
             )
             if agent_ref is not None:
                 agent_ref[0] = agent
+            # Pass session_id through as task_id so tool handlers can
+            # correlate back to the caller's session (e.g. SpringBrand
+            # demo's request_human_handoff proxy uses this to look up the
+            # active demo run from Redis). Falls back to "default" for the
+            # legacy CLI path where session_id is unset.
             result = agent.run_conversation(
                 user_message=user_message,
                 conversation_history=conversation_history,
-                task_id="default",
+                task_id=session_id or "default",
             )
             usage = {
                 "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
