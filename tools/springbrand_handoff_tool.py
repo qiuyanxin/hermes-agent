@@ -66,11 +66,15 @@ def springbrand_handoff(
             ensure_ascii=False,
         )
 
+    # No X-Tenant-Id header: Hermes runs cross-tenant in a single process
+    # and has no way to know the caller's tenant_id. demo's
+    # /v1/internal/handoff_dispatch resolves tenant_id from the Redis
+    # run-context keyed by session_id. The Bearer token authenticates the
+    # service-to-service call; tenant scoping is handled server-side.
     headers = {"Content-Type": "application/json"}
     token = _agent_api_token()
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    headers["X-Tenant-Id"] = os.environ.get("AGENT_DEFAULT_TENANT", "tenant_demo")
 
     body = {
         "session_id": session_id,

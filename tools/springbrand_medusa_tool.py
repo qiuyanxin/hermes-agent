@@ -57,34 +57,57 @@ def check_springbrand_medusa_requirements() -> bool:
 # commerce-adapter routes (read-only catalog + inventory)
 # ---------------------------------------------------------------------------
 
-def _post_adapter_tool(tool_name: str, scopes: List[str], input_payload: dict) -> dict:
-    url = f"{_commerce_base_url()}/tools/{tool_name}"
+def _post_adapter_tool(
+    tool_name: str, scopes: List[str], input_payload: dict, session_id: str
+) -> dict:
+    # Multi-tenant correct: route ALL adapter calls through the demo
+    # agent-backend's medusa_tool_dispatch endpoint instead of hitting
+    # commerce-adapter directly. demo resolves the caller's tenant_id from
+    # the Redis run-context (which it wrote keyed by session_id before
+    # calling /v1/runs), then proxies to commerce-adapter with the proper
+    # envelope.context. Hermes runs cross-tenant in a single process and
+    # has no business knowing tenant_id at all — keeping that knowledge
+    # on the demo side preserves tenant isolation under multi-tenant
+    # deploys (e.g. SUpost vs SJTU Lemon vs future Medusa tenants) and
+    # gives demo a single point for adapter audit / rate-limiting policy.
+    base = _agent_backend_url()
+    if not base:
+        return {"error": "agent_backend_not_configured", "tool_name": tool_name}
+    if not session_id:
+        return {"error": "missing_session_id", "tool_name": tool_name}
     headers = {"Content-Type": "application/json"}
-    token = _commerce_token()
+    token = _agent_api_token()
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    envelope = {
-        "context": {
-            "scopes": scopes,
-            "actor_type": "agent",
-            "actor_id": "hermes-agent",
-        },
+    body = {
+        "session_id": session_id,
+        "tool_name": tool_name,
+        "scopes": scopes,
         "input": input_payload,
     }
     try:
-        resp = httpx.post(url, json=envelope, headers=headers, timeout=COMMERCE_TIMEOUT_SECONDS)
+        resp = httpx.post(
+            f"{base}/v1/internal/medusa_tool_dispatch",
+            json=body,
+            headers=headers,
+            timeout=COMMERCE_TIMEOUT_SECONDS,
+        )
     except httpx.RequestError as exc:
-        return {"error": "adapter_unreachable", "detail": str(exc)}
-    if resp.status_code >= 400:
+        return {"error": "agent_backend_unreachable", "detail": str(exc)}
+    try:
+        payload = resp.json()
+    except json.JSONDecodeError:
         return {
-            "error": "adapter_http_error",
+            "error": "non_json_response",
             "status": resp.status_code,
             "body": resp.text[:500],
         }
-    try:
-        return resp.json()
-    except json.JSONDecodeError:
-        return {"error": "adapter_returned_invalid_json", "body": resp.text[:500]}
+    if resp.status_code >= 400 and "error" not in payload:
+        payload = {
+            "error": f"agent_backend_status_{resp.status_code}",
+            "body": payload,
+        }
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -98,11 +121,13 @@ def _post_propose_bundle(session_id: str, label: str, items: List[dict], intro: 
     if not session_id:
         return {"ok": False, "error": "missing session_id (Hermes runtime did not propagate task_id)"}
 
+    # No X-Tenant-Id header: Hermes runs cross-tenant; demo's dispatch
+    # endpoints resolve tenant_id from the Redis run-context keyed by
+    # session_id. The Bearer token authenticates this service call.
     headers = {"Content-Type": "application/json"}
     token = _agent_api_token()
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    headers["X-Tenant-Id"] = os.environ.get("AGENT_DEFAULT_TENANT", "tenant_demo")
 
     body = {"session_id": session_id, "label": label, "items": items, "intro": intro}
     try:
@@ -146,26 +171,26 @@ def springbrand_medusa(
         payload: dict = {"query": query, "limit": max(1, min(int(limit or 10), 50))}
         if vendor_handle:
             payload["vendor_handle"] = vendor_handle
-        result = _post_adapter_tool("search_products", ["catalog:read"], payload)
+        result = _post_adapter_tool("search_products", ["catalog:read"], payload, session_id)
         return json.dumps({"action": act, "query": query, "result": result}, ensure_ascii=False)
 
     if act == "discover_merchants":
         payload = {"query": query} if query else {}
         if vendor_handle:
             payload["vendor_handle"] = vendor_handle
-        result = _post_adapter_tool("discover_merchants", ["catalog:read"], payload)
+        result = _post_adapter_tool("discover_merchants", ["catalog:read"], payload, session_id)
         return json.dumps({"action": act, "result": result}, ensure_ascii=False)
 
     if act == "get_product":
         if not product_id:
             return json.dumps({"error": "product_id is required for get_product"}, ensure_ascii=False)
-        result = _post_adapter_tool("get_product", ["catalog:read"], {"product_id": product_id})
+        result = _post_adapter_tool("get_product", ["catalog:read"], {"product_id": product_id}, session_id)
         return json.dumps({"action": act, "product_id": product_id, "result": result}, ensure_ascii=False)
 
     if act == "check_inventory":
         if not product_id:
             return json.dumps({"error": "product_id is required for check_inventory"}, ensure_ascii=False)
-        result = _post_adapter_tool("check_inventory", ["inventory:read"], {"product_id": product_id})
+        result = _post_adapter_tool("check_inventory", ["inventory:read"], {"product_id": product_id}, session_id)
         return json.dumps({"action": act, "product_id": product_id, "result": result}, ensure_ascii=False)
 
     if act == "propose_bundle":
