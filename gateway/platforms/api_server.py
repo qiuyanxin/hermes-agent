@@ -2191,10 +2191,15 @@ class APIServerAdapter(BasePlatformAdapter):
                     tool_progress_callback=event_cb,
                 )
                 def _run_sync():
+                    # Mirror the chat-completions path: pass session_id as
+                    # task_id so tool handlers can correlate back to the
+                    # caller (SpringBrand demo's request_human_handoff
+                    # proxy reads this via kw["task_id"] to look up the
+                    # active demo run from Redis).
                     r = agent.run_conversation(
                         user_message=user_message,
                         conversation_history=conversation_history,
-                        task_id="default",
+                        task_id=session_id or "default",
                     )
                     u = {
                         "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
