@@ -22,8 +22,18 @@
 
 model:
   provider: openrouter
-  default: openai/gpt-4.1-mini
+  default: moonshotai/kimi-k2.6
   base_url: https://openrouter.ai/api/v1
+
+# OpenRouter provider routing — sort by latency so each /v1/runs picks
+# the fastest currently-available provider for the requested model.
+# Kimi-K2.6 is multi-provider on OpenRouter (Moonshot direct + several
+# inference partners with varying latency), so this is materially
+# better than the default "auto" sort. See
+# https://openrouter.ai/docs/provider-routing for the schema; CLI loads
+# this block via cli.py:_provider_sort = pr.get("sort").
+provider_routing:
+  sort: latency
 
 # API server platform exposes only the SpringBrand business tools + the
 # Anthropic-style skills hub (so LLM can dynamically load SKILL.md from

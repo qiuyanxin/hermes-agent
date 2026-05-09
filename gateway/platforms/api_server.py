@@ -548,11 +548,28 @@ class APIServerAdapter(BasePlatformAdapter):
         runtime_kwargs = _resolve_runtime_agent_kwargs()
         model = model_override or _resolve_gateway_model()
 
+        # Load gateway config unconditionally so we can read both
+        # platform_toolsets.api_server (for enabled_toolsets) AND
+        # provider_routing (for OpenRouter provider preferences). The
+        # CLI path reads provider_routing via cli.py:_provider_sort
+        # but the gateway path previously dropped it.
+        user_config = _load_gateway_config()
         if enabled_toolsets_override is not None:
             enabled_toolsets = sorted(enabled_toolsets_override)
         else:
-            user_config = _load_gateway_config()
             enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
+
+        # OpenRouter provider routing — sort by latency / restrict to
+        # specific providers / etc. Set in config.yaml under
+        # `provider_routing:` (see SpringBrand-customizations branch
+        # config). AIAgent maps these to the OpenRouter `provider`
+        # body field.
+        provider_routing = user_config.get("provider_routing") or {}
+        provider_sort = provider_routing.get("sort") or None
+        providers_order = provider_routing.get("order") or None
+        providers_ignored = provider_routing.get("ignore") or None
+        provider_require_parameters = bool(provider_routing.get("require_parameters", False))
+        provider_data_collection = provider_routing.get("data_collection") or None
 
         max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
 
@@ -577,6 +594,11 @@ class APIServerAdapter(BasePlatformAdapter):
             tool_complete_callback=tool_complete_callback,
             session_db=self._ensure_session_db(),
             fallback_model=fallback_model,
+            provider_sort=provider_sort,
+            providers_order=providers_order,
+            providers_ignored=providers_ignored,
+            provider_require_parameters=provider_require_parameters,
+            provider_data_collection=provider_data_collection,
         )
         return agent
 
