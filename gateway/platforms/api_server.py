@@ -2335,11 +2335,14 @@ class APIServerAdapter(BasePlatformAdapter):
                         await self._store.xadd_event(run_id, end_event)
                     except Exception as exc:
                         logger.debug("[api_server] failed to push __end__ for %s: %s", run_id, exc)
-                    # Phase A: release the concurrency slot acquired in _handle_runs
+                    # Phase A: release the concurrency slot acquired in _handle_runs.
+                    # DECR failures are upgraded to warning (Task 2 precedent for
+                    # teardown-path exceptions) so operators see slot leaks rather
+                    # than discovering them via the 600s TTL expiry.
                     try:
                         await self._store.decr_concurrency()
                     except Exception as exc:
-                        logger.debug("[api_server] failed to DECR concurrency for %s: %s", run_id, exc)
+                        logger.warning("[api_server] DECR concurrency failed for %s — slot leaked until TTL: %s", run_id, exc)
                 else:
                     try:
                         q.put_nowait(None)
@@ -2375,7 +2378,21 @@ class APIServerAdapter(BasePlatformAdapter):
                     status=429,
                 )
 
-        task = asyncio.create_task(_run_and_close())
+        try:
+            task = asyncio.create_task(_run_and_close())
+        except Exception:
+            # Defensive: if create_task itself raises (event loop closing during
+            # shutdown), DECR the slot we just acquired so the counter stays
+            # symmetric. _run_and_close was never invoked, so its finally won't fire.
+            if _store_ref is not None:
+                try:
+                    await _store_ref.decr_concurrency()
+                except Exception:
+                    pass
+            # Roll back queue allocation too for consistency with the over-limit path
+            self._run_streams.pop(run_id, None)
+            self._run_streams_created.pop(run_id, None)
+            raise
         try:
             self._background_tasks.add(task)
         except TypeError:
