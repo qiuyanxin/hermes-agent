@@ -83,3 +83,32 @@ async def test_store_accepts_tool_lifecycle_events():
     events = await store.xread_events("run_y", after_id="0-0", block_ms=10)
     event_types = [p["event"] for _, p in events]
     assert event_types == ["tool.started", "tool.completed", "message.delta", "__end__"]
+
+
+@pytest.mark.asyncio
+async def test_store_accepts_run_lifecycle_events():
+    """run.completed and run.failed events survive a store round-trip.
+
+    Sites D and E in Task 3 push these events through xadd_event when self._store
+    is set. This validates the payload shape is JSON-serializable and readable back.
+    """
+    from gateway.platforms.redis_store import InMemoryStore
+    store = InMemoryStore()
+    await store.xadd_event("run_done", {
+        "event": "run.completed",
+        "run_id": "run_done",
+        "timestamp": 123.0,
+        "output": "final answer",
+        "usage": {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30},
+    })
+    await store.xadd_event("run_done", {
+        "event": "run.failed",
+        "run_id": "run_done",
+        "timestamp": 124.0,
+        "error": "boom",
+    })
+
+    events = await store.xread_events("run_done", after_id="0-0", block_ms=10)
+    assert [p["event"] for _, p in events] == ["run.completed", "run.failed"]
+    assert events[0][1]["usage"]["total_tokens"] == 30
+    assert events[1][1]["error"] == "boom"

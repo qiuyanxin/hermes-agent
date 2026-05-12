@@ -2288,24 +2288,41 @@ class APIServerAdapter(BasePlatformAdapter):
 
                 result, usage = await asyncio.get_running_loop().run_in_executor(None, _run_sync)
                 final_response = result.get("final_response", "") if isinstance(result, dict) else ""
-                q.put_nowait({
+                completed_event = {
                     "event": "run.completed",
                     "run_id": run_id,
                     "timestamp": time.time(),
                     "output": final_response,
                     "usage": usage,
-                })
+                }
+                if self._store is not None:
+                    try:
+                        await self._store.xadd_event(run_id, completed_event)
+                    except Exception as exc:
+                        logger.debug("[api_server] failed to push run.completed for %s: %s", run_id, exc)
+                else:
+                    try:
+                        q.put_nowait(completed_event)
+                    except Exception:
+                        pass
             except Exception as exc:
                 logger.exception("[api_server] run %s failed", run_id)
-                try:
-                    q.put_nowait({
-                        "event": "run.failed",
-                        "run_id": run_id,
-                        "timestamp": time.time(),
-                        "error": str(exc),
-                    })
-                except Exception:
-                    pass
+                failed_event = {
+                    "event": "run.failed",
+                    "run_id": run_id,
+                    "timestamp": time.time(),
+                    "error": str(exc),
+                }
+                if self._store is not None:
+                    try:
+                        await self._store.xadd_event(run_id, failed_event)
+                    except Exception as store_exc:
+                        logger.debug("[api_server] failed to push run.failed for %s: %s", run_id, store_exc)
+                else:
+                    try:
+                        q.put_nowait(failed_event)
+                    except Exception:
+                        pass
             finally:
                 # Signal SSE stream to close — emit __end__ marker via store if present,
                 # else fall back to None sentinel on legacy queue.
