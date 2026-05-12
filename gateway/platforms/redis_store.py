@@ -151,12 +151,20 @@ class InMemoryStore(EventStore):
     async def xread_events(
         self, run_id: str, after_id: str, block_ms: int
     ) -> List[Tuple[str, Dict[str, Any]]]:
-        # Simple non-blocking implementation: caller layer handles wait loop.
         async with self._lock:
             entries = self._streams.get(run_id, [])
             if after_id == "0-0":
-                return list(entries)
-            return [e for e in entries if e[0] > after_id]
+                result = list(entries)
+            else:
+                result = [e for e in entries if e[0] > after_id]
+        if not result and block_ms > 0:
+            # Honor block_ms minimally to avoid spin loops in callers that expect
+            # XREAD BLOCK semantics (e.g., _handle_run_events SSE poll loop).
+            # This is a coarse single-sleep approximation, not a true condition wait —
+            # InMemoryStore is single-process dev/test only, so callers tolerate the
+            # extra latency. Cap at 1s so tests don't hang on a buggy run_id.
+            await asyncio.sleep(min(block_ms / 1000.0, 1.0))
+        return result
 
     async def incr_concurrency(self) -> int:
         async with self._lock:

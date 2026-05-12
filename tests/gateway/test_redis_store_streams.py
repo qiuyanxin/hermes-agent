@@ -112,3 +112,21 @@ async def test_in_memory_store_orders_burst_events_correctly():
     after_first = all_events[0][0]
     resumed = await store.xread_events("run_burst", after_id=after_first, block_ms=10)
     assert [p["event"] for _, p in resumed] == [f"e{i}" for i in range(1, 15)]
+
+
+@pytest.mark.asyncio
+async def test_in_memory_store_honors_block_ms_on_empty():
+    """When no events match after_id, InMemoryStore must actually wait at least
+    block_ms (capped at 1s) instead of returning immediately. This guards against
+    spin loops in callers that expect XREAD BLOCK semantics.
+    """
+    import time as _time
+    store = InMemoryStore()
+    start = _time.monotonic()
+    result = await store.xread_events("run_block", after_id="0-0", block_ms=200)
+    elapsed = _time.monotonic() - start
+    assert result == []
+    # Block window of 200ms should result in at least ~0.15s elapsed (some scheduling slack)
+    assert elapsed >= 0.15, f"InMemoryStore.xread_events returned in {elapsed}s, expected >=0.15s for block_ms=200"
+    # And no more than ~1.5s (the cap is 1.0s; allow some scheduling overhead)
+    assert elapsed <= 1.5
