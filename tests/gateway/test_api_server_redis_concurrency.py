@@ -142,3 +142,42 @@ async def test_store_xread_resume_skips_already_consumed():
 
     new_only = await store.xread_events("run_resume", after_id=first_id, block_ms=10)
     assert [p["event"] for _, p in new_only] == ["b", "c"]
+
+
+@pytest.mark.asyncio
+async def test_concurrency_increments_and_decrements_correctly():
+    from gateway.platforms.redis_store import InMemoryStore
+    store = InMemoryStore()
+    assert await store.incr_concurrency() == 1
+    assert await store.incr_concurrency() == 2
+    assert await store.decr_concurrency() == 1
+    assert await store.decr_concurrency() == 0
+    # Decrement past zero clamps
+    assert await store.decr_concurrency() == 0
+
+
+@pytest.mark.asyncio
+async def test_concurrency_round_trip_simulating_request_flow():
+    """Simulate the INCR-then-check pattern: 3 INCRs against a limit=2 should
+    accept 2 and roll back the 3rd via DECR."""
+    from gateway.platforms.redis_store import InMemoryStore
+    store = InMemoryStore()
+    limit = 2
+
+    accepted = 0
+    for _ in range(3):
+        current = await store.incr_concurrency()
+        if current > limit:
+            await store.decr_concurrency()
+        else:
+            accepted += 1
+
+    assert accepted == 2
+    # All 3 requests came in: 2 accepted (still alive), 1 rolled back. Counter == 2.
+    # After both accepted requests finish (DECR each), counter should be 0.
+    await store.decr_concurrency()
+    await store.decr_concurrency()
+    # Final state
+    final = await store.incr_concurrency()
+    await store.decr_concurrency()
+    assert final == 1  # one INCR after all DECRs → 1

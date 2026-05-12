@@ -2085,7 +2085,17 @@ class APIServerAdapter(BasePlatformAdapter):
     # /v1/runs — structured event streaming
     # ------------------------------------------------------------------
 
-    _MAX_CONCURRENT_RUNS = 10  # Prevent unbounded resource allocation
+    # Phase A: configurable global concurrency limit, externalized to Redis when
+    # available. Default 100 aligns with ADR 0009 D1 target ("100 并发不再硬 429").
+    # The counter lives in Redis when self._store is a RedisStore, giving
+    # multi-replica services a shared bucket; otherwise it lives per-process
+    # in InMemoryStore.
+    @property
+    def _max_concurrent_runs(self) -> int:
+        try:
+            return int(os.environ.get("HERMES_MAX_CONCURRENT_RUNS", "100"))
+        except ValueError:
+            return 100
     _RUN_STREAM_TTL = 300  # seconds before orphaned runs are swept
 
     def _make_run_event_callback(self, run_id: str, loop: "asyncio.AbstractEventLoop"):
@@ -2151,13 +2161,6 @@ class APIServerAdapter(BasePlatformAdapter):
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
-
-        # Enforce concurrency limit
-        if len(self._run_streams) >= self._MAX_CONCURRENT_RUNS:
-            return web.json_response(
-                _openai_error(f"Too many concurrent runs (max {self._MAX_CONCURRENT_RUNS})", code="rate_limit_exceeded"),
-                status=429,
-            )
 
         try:
             body = await request.json()
@@ -2332,11 +2335,45 @@ class APIServerAdapter(BasePlatformAdapter):
                         await self._store.xadd_event(run_id, end_event)
                     except Exception as exc:
                         logger.debug("[api_server] failed to push __end__ for %s: %s", run_id, exc)
+                    # Phase A: release the concurrency slot acquired in _handle_runs
+                    try:
+                        await self._store.decr_concurrency()
+                    except Exception as exc:
+                        logger.debug("[api_server] failed to DECR concurrency for %s: %s", run_id, exc)
                 else:
                     try:
                         q.put_nowait(None)
                     except Exception:
                         pass
+                    # Legacy path: nothing to decrement — capacity check counts
+                    # len(self._run_streams) live, and _run_streams_created cleanup
+                    # in _handle_run_events naturally releases the slot
+
+        # Phase A: global concurrency check via Redis when _store is set, else
+        # in-memory per-process. Placed immediately before task creation so any
+        # early validation failures don't leak a slot. INCR-then-check is atomic
+        # per request — no race window.
+        _store_ref = self._store
+        _limit = self._max_concurrent_runs
+        if _store_ref is not None:
+            _current = await _store_ref.incr_concurrency()
+            if _current > _limit:
+                await _store_ref.decr_concurrency()
+                # Roll back queue allocation so legacy path stays consistent
+                self._run_streams.pop(run_id, None)
+                self._run_streams_created.pop(run_id, None)
+                return web.json_response(
+                    _openai_error(f"Too many concurrent runs (max {_limit})", code="rate_limit_exceeded"),
+                    status=429,
+                )
+        else:
+            if len(self._run_streams) > _limit:
+                self._run_streams.pop(run_id, None)
+                self._run_streams_created.pop(run_id, None)
+                return web.json_response(
+                    _openai_error(f"Too many concurrent runs (max {_limit})", code="rate_limit_exceeded"),
+                    status=429,
+                )
 
         task = asyncio.create_task(_run_and_close())
         try:
