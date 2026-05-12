@@ -2481,8 +2481,8 @@ class APIServerAdapter(BasePlatformAdapter):
         if self._store is not None:
             try:
                 await self._store.close()
-            except Exception:
-                logger.debug("[api_server] error closing _store during teardown")
+            except Exception as exc:
+                logger.warning("[api_server] _store.close() failed during teardown: %s", exc)
             self._store = None
         if self._runner:
             await self._runner.cleanup()
