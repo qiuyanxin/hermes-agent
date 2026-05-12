@@ -62,7 +62,9 @@ mcp = ["mcp>=1.2.0,<2"]
 homeassistant = ["aiohttp>=3.9.0,<4"]
 sms = ["aiohttp>=3.9.0,<4"]
 acp = ["agent-client-protocol>=0.9.0,<1.0"]
-mistral = ["mistralai>=2.3.0,<3"]
+# mistral: removed — `mistralai` package quarantined on PyPI (see
+# pypi.org/simple/mistralai/, no available releases). Restore this extra
+# when mistralai is unquarantined.
 bedrock = ["boto3>=1.35.0,<2"]
 termux = [
   # Tested Android / Termux path: keeps the core CLI feature-rich while
@@ -109,7 +111,10 @@ all = [
   "hermes-agent[voice]",
   "hermes-agent[dingtalk]",
   "hermes-agent[feishu]",
-  "hermes-agent[mistral]",
+  # mistral: PyPI quarantined mistralai package (see pypi.org/simple/mistralai/),
+  # blocks fresh `uv pip install -e ".[all]"` builds. Removed from [all] until
+  # mistralai is restored or replaced. The [mistral] extra above is preserved
+  # for users who explicitly opt in.
   "hermes-agent[bedrock]",
   "hermes-agent[web]",
 ]
