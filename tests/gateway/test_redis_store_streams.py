@@ -5,7 +5,6 @@ Uses fakeredis (already a transitive test dep) to validate XADD/XREAD semantics
 without requiring a live Redis. If fakeredis is unavailable, tests are skipped
 (this matches Hermes' existing test conventions — see tests/gateway/test_*.py).
 """
-import asyncio
 import pytest
 
 pytest.importorskip("fakeredis")
@@ -93,3 +92,23 @@ async def test_concurrency_decr_never_negative():
     result = await store.decr_concurrency()
     # Either 0 (clamped) or -1 (raw) — store implementation must clamp
     assert result == 0
+
+
+@pytest.mark.asyncio
+async def test_in_memory_store_orders_burst_events_correctly():
+    """Regression: seq counter must be zero-padded so lex sort matches numeric order.
+
+    Without padding, after 9 events in the same ms, '...-10' < '...-2' lexicographically,
+    causing xread_events resume to skip events.
+    """
+    store = InMemoryStore()
+    for i in range(15):
+        await store.xadd_event("run_burst", {"event": f"e{i}"})
+
+    all_events = await store.xread_events("run_burst", after_id="0-0", block_ms=10)
+    assert [p["event"] for _, p in all_events] == [f"e{i}" for i in range(15)]
+
+    # Resume after the first event must return the remaining 14 in order
+    after_first = all_events[0][0]
+    resumed = await store.xread_events("run_burst", after_id=after_first, block_ms=10)
+    assert [p["event"] for _, p in resumed] == [f"e{i}" for i in range(1, 15)]

@@ -19,7 +19,8 @@ import json
 import logging
 import os
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from abc import ABC, abstractmethod
+from typing import Any, Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -34,24 +35,29 @@ STREAM_KEY_FMT = "hermes:run:{run_id}:stream"
 STREAM_TTL_SECONDS = 600  # 10 min; matches existing _RUN_STREAM_TTL spirit
 CONCURRENCY_KEY = "hermes:concurrency:current"
 CONCURRENCY_TTL_SECONDS = 600  # safety net: counter expires if process dies mid-run
+XREAD_MAX_COUNT = 100  # max events per XREAD call; client polls again for more
 
 
-class EventStore:
+class EventStore(ABC):
     """Abstract interface. Both RedisStore and InMemoryStore conform."""
 
+    @abstractmethod
     async def xadd_event(self, run_id: str, payload: Dict[str, Any]) -> str:
-        raise NotImplementedError
+        ...
 
+    @abstractmethod
     async def xread_events(
         self, run_id: str, after_id: str, block_ms: int
     ) -> List[Tuple[str, Dict[str, Any]]]:
-        raise NotImplementedError
+        ...
 
+    @abstractmethod
     async def incr_concurrency(self) -> int:
-        raise NotImplementedError
+        ...
 
+    @abstractmethod
     async def decr_concurrency(self) -> int:
-        raise NotImplementedError
+        ...
 
     async def close(self) -> None:
         pass
@@ -77,7 +83,7 @@ class RedisStore(EventStore):
     ) -> List[Tuple[str, Dict[str, Any]]]:
         key = STREAM_KEY_FMT.format(run_id=run_id)
         # XREAD BLOCK returns None on timeout (no new events).
-        resp = await self._r.xread({key: after_id}, block=block_ms, count=100)
+        resp = await self._r.xread({key: after_id}, block=block_ms, count=XREAD_MAX_COUNT)
         if not resp:
             return []
         # resp = [(stream_key, [(stream_id, {field: value}), ...])]
@@ -104,9 +110,11 @@ class RedisStore(EventStore):
 
     async def decr_concurrency(self) -> int:
         n = await self._r.decr(CONCURRENCY_KEY)
-        # Clamp to zero if a race made us go negative.
         n = int(n)
         if n < 0:
+            # Counter went negative (e.g., process restart lost INCR but caught DECR,
+            # or a manual reset). Clamp to 0; concurrent racing DECRs all clamp to the
+            # same 0, so the non-atomic read-modify-write is safe here.
             await self._r.set(CONCURRENCY_KEY, 0, ex=CONCURRENCY_TTL_SECONDS)
             return 0
         return n
@@ -114,8 +122,8 @@ class RedisStore(EventStore):
     async def close(self) -> None:
         try:
             await self._r.aclose()
-        except Exception:  # pragma: no cover
-            pass
+        except Exception as exc:  # pragma: no cover
+            logger.debug("redis_store: aclose() raised during teardown: %s", exc)
 
 
 class InMemoryStore(EventStore):
@@ -132,7 +140,7 @@ class InMemoryStore(EventStore):
 
     def _next_id(self) -> str:
         self._seq += 1
-        return f"{int(time.time() * 1000)}-{self._seq}"
+        return f"{int(time.time() * 1000)}-{self._seq:010d}"
 
     async def xadd_event(self, run_id: str, payload: Dict[str, Any]) -> str:
         async with self._lock:
@@ -170,6 +178,12 @@ def make_store_from_env() -> EventStore:
             logger.info("redis_store: using RedisStore (url=%s)", url.split("@")[-1])
             return RedisStore(client)
         except Exception as exc:
-            logger.error("redis_store: failed to init Redis (%s) — falling back to in-memory", exc)
-    logger.info("redis_store: REDIS_URL not set — using InMemoryStore (single-process only)")
+            logger.error(
+                "redis_store: failed to init Redis (%s) — falling back to InMemoryStore", exc
+            )
+            return InMemoryStore()
+    if not url:
+        logger.info("redis_store: REDIS_URL not set — using InMemoryStore (single-process only)")
+    else:
+        logger.warning("redis_store: redis-py not importable — using InMemoryStore")
     return InMemoryStore()
