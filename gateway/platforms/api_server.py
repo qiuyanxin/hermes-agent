@@ -2089,15 +2089,32 @@ class APIServerAdapter(BasePlatformAdapter):
     _RUN_STREAM_TTL = 300  # seconds before orphaned runs are swept
 
     def _make_run_event_callback(self, run_id: str, loop: "asyncio.AbstractEventLoop"):
-        """Return a tool_progress_callback that pushes structured events to the run's SSE queue."""
+        """Return a tool_progress_callback that pushes structured events to the run's stream.
+
+        Phase A: If self._store is set, schedule store.xadd_event via run_coroutine_threadsafe
+        (this callback runs on the LLM executor thread, not the event loop). Otherwise fall back
+        to the legacy _run_streams asyncio.Queue.
+        """
+        store = self._store
+
         def _push(event: Dict[str, Any]) -> None:
-            q = self._run_streams.get(run_id)
-            if q is None:
+            if store is None:
+                # Legacy in-memory queue path
+                q = self._run_streams.get(run_id)
+                if q is not None:
+                    try:
+                        loop.call_soon_threadsafe(q.put_nowait, event)
+                    except Exception as exc:
+                        logger.debug("[api_server] _push to in-memory queue failed for %s: %s", run_id, exc)
                 return
+            # Redis-backed path: schedule async XADD on the event loop from this thread.
+            # run_coroutine_threadsafe returns a concurrent.futures.Future — fire-and-forget,
+            # do not await. Exceptions inside the coroutine will be silently dropped unless
+            # the future is observed, matching the legacy queue.put_nowait semantics.
             try:
-                loop.call_soon_threadsafe(q.put_nowait, event)
-            except Exception:
-                pass
+                asyncio.run_coroutine_threadsafe(store.xadd_event(run_id, event), loop)
+            except Exception as exc:
+                logger.debug("[api_server] _push to store failed for %s: %s", run_id, exc)
 
         def _callback(event_type: str, tool_name: str = None, preview: str = None, args=None, **kwargs):
             ts = time.time()
@@ -2164,18 +2181,21 @@ class APIServerAdapter(BasePlatformAdapter):
         event_cb = self._make_run_event_callback(run_id, loop)
 
         # Also wire stream_delta_callback so message.delta events flow through
+        store = self._store
         def _text_cb(delta: Optional[str]) -> None:
             if delta is None:
                 return
+            event = {"event": "message.delta", "run_id": run_id, "timestamp": time.time(), "delta": delta}
+            if store is None:
+                try:
+                    loop.call_soon_threadsafe(q.put_nowait, event)
+                except Exception as exc:
+                    logger.debug("[api_server] _text_cb to in-memory queue failed for %s: %s", run_id, exc)
+                return
             try:
-                loop.call_soon_threadsafe(q.put_nowait, {
-                    "event": "message.delta",
-                    "run_id": run_id,
-                    "timestamp": time.time(),
-                    "delta": delta,
-                })
-            except Exception:
-                pass
+                asyncio.run_coroutine_threadsafe(store.xadd_event(run_id, event), loop)
+            except Exception as exc:
+                logger.debug("[api_server] _text_cb to store failed for %s: %s", run_id, exc)
 
         instructions = body.get("instructions")
         previous_response_id = body.get("previous_response_id")
@@ -2287,11 +2307,19 @@ class APIServerAdapter(BasePlatformAdapter):
                 except Exception:
                     pass
             finally:
-                # Sentinel: signal SSE stream to close
-                try:
-                    q.put_nowait(None)
-                except Exception:
-                    pass
+                # Signal SSE stream to close — emit __end__ marker via store if present,
+                # else fall back to None sentinel on legacy queue.
+                end_event = {"event": "__end__", "run_id": run_id, "timestamp": time.time()}
+                if self._store is not None:
+                    try:
+                        await self._store.xadd_event(run_id, end_event)
+                    except Exception as exc:
+                        logger.debug("[api_server] failed to push __end__ for %s: %s", run_id, exc)
+                else:
+                    try:
+                        q.put_nowait(None)
+                    except Exception:
+                        pass
 
         task = asyncio.create_task(_run_and_close())
         try:
