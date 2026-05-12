@@ -2349,22 +2349,31 @@ class APIServerAdapter(BasePlatformAdapter):
         return web.json_response({"run_id": run_id, "status": "started"}, status=202)
 
     async def _handle_run_events(self, request: "web.Request") -> "web.StreamResponse":
-        """GET /v1/runs/{run_id}/events — SSE stream of structured agent lifecycle events."""
+        """GET /v1/runs/{run_id}/events — SSE stream of structured agent lifecycle events.
+
+        Phase A: reads from Redis Streams via self._store when available, falls back to
+        the legacy self._run_streams queue otherwise. Supports ?after=<stream_id> for
+        resume after client reconnect. Heartbeat cadence is 15s (ADR 0009 D2).
+        """
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
 
         run_id = request.match_info["run_id"]
+        # SSE resume: client passes last-seen stream id to skip already-consumed events
+        after_id = request.query.get("after", "0-0")
 
-        # Allow subscribing slightly before the run is registered (race condition window)
-        for _ in range(20):
-            if run_id in self._run_streams:
-                break
-            await asyncio.sleep(0.05)
-        else:
-            return web.json_response(_openai_error(f"Run not found: {run_id}", code="run_not_found"), status=404)
-
-        q = self._run_streams[run_id]
+        # Registration race window: when using the in-memory queue path, the queue
+        # is created in _handle_runs immediately before the run task starts. Subscribers
+        # may arrive a few ms early. With Redis-backed store, XREAD BLOCK naturally
+        # waits for the first event, so the race window doesn't need an explicit poll.
+        if self._store is None:
+            for _ in range(20):
+                if run_id in self._run_streams:
+                    break
+                await asyncio.sleep(0.05)
+            else:
+                return web.json_response(_openai_error(f"Run not found: {run_id}", code="run_not_found"), status=404)
 
         response = web.StreamResponse(
             status=200,
@@ -2377,24 +2386,56 @@ class APIServerAdapter(BasePlatformAdapter):
         )
         await response.prepare(request)
 
+        HEARTBEAT_SECONDS = 15  # ADR 0009 D2
+        BLOCK_MS = HEARTBEAT_SECONDS * 1000
+
         try:
-            while True:
-                try:
-                    event = await asyncio.wait_for(q.get(), timeout=30.0)
-                except asyncio.TimeoutError:
-                    await response.write(b": keepalive\n\n")
-                    continue
-                if event is None:
-                    # Run finished — send final SSE comment and close
-                    await response.write(b": stream closed\n\n")
-                    break
-                payload = f"data: {json.dumps(event)}\n\n"
-                await response.write(payload.encode())
+            if self._store is not None:
+                # Redis-backed path
+                current_id = after_id
+                while True:
+                    events = await self._store.xread_events(run_id, after_id=current_id, block_ms=BLOCK_MS)
+                    if not events:
+                        # Block window elapsed with no new events — emit heartbeat
+                        await response.write(b": keepalive\n\n")
+                        continue
+                    end_reached = False
+                    for sid, payload in events:
+                        current_id = sid
+                        if payload.get("event") == "__end__":
+                            end_reached = True
+                            break
+                        # Wrap in SSE event with `id:` so client EventSource auto-tracks
+                        # Last-Event-ID and can be passed back via ?after= on reconnect
+                        sse = f"id: {sid}\ndata: {json.dumps(payload)}\n\n"
+                        await response.write(sse.encode())
+                    if end_reached:
+                        await response.write(b": stream closed\n\n")
+                        break
+            else:
+                # Legacy in-memory queue path
+                q = self._run_streams[run_id]
+                while True:
+                    try:
+                        event = await asyncio.wait_for(q.get(), timeout=HEARTBEAT_SECONDS)
+                    except asyncio.TimeoutError:
+                        await response.write(b": keepalive\n\n")
+                        continue
+                    if event is None:
+                        await response.write(b": stream closed\n\n")
+                        break
+                    payload = f"data: {json.dumps(event)}\n\n"
+                    await response.write(payload.encode())
         except Exception as exc:
             logger.debug("[api_server] SSE stream error for run %s: %s", run_id, exc)
         finally:
-            self._run_streams.pop(run_id, None)
-            self._run_streams_created.pop(run_id, None)
+            # Legacy in-memory cleanup. Redis stream TTL handles its own cleanup.
+            # Note: when store is set, _run_streams[run_id] is still created in _handle_runs
+            # (it's never reaped here because store path doesn't read from it). The existing
+            # _sweep_orphaned_runs sweeper will clean these stale queues after _RUN_STREAM_TTL.
+            if self._store is None:
+                self._run_streams.pop(run_id, None)
+                self._run_streams_created.pop(run_id, None)
 
         return response
 

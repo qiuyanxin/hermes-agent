@@ -112,3 +112,33 @@ async def test_store_accepts_run_lifecycle_events():
     assert [p["event"] for _, p in events] == ["run.completed", "run.failed"]
     assert events[0][1]["usage"]["total_tokens"] == 30
     assert events[1][1]["error"] == "boom"
+
+
+@pytest.mark.asyncio
+async def test_store_xread_replays_full_history_from_zero():
+    """Resume from 0-0 must replay all past events — basic resume contract."""
+    from gateway.platforms.redis_store import InMemoryStore
+    store = InMemoryStore()
+    await store.xadd_event("run_replay", {"event": "tool.started", "tool": "supost_search"})
+    await store.xadd_event("run_replay", {"event": "tool.completed", "tool": "supost_search"})
+    await store.xadd_event("run_replay", {"event": "__end__"})
+
+    events = await store.xread_events("run_replay", after_id="0-0", block_ms=10)
+    assert [p["event"] for _, p in events] == ["tool.started", "tool.completed", "__end__"]
+
+
+@pytest.mark.asyncio
+async def test_store_xread_resume_skips_already_consumed():
+    """Client passes last-seen stream id; only newer events come back.
+
+    This is the core resume scenario: client reconnects after network blip,
+    passes ?after=<last_id> on the GET, and gets only events it hasn't seen.
+    """
+    from gateway.platforms.redis_store import InMemoryStore
+    store = InMemoryStore()
+    first_id = await store.xadd_event("run_resume", {"event": "a"})
+    await store.xadd_event("run_resume", {"event": "b"})
+    await store.xadd_event("run_resume", {"event": "c"})
+
+    new_only = await store.xread_events("run_resume", after_id=first_id, block_ms=10)
+    assert [p["event"] for _, p in new_only] == ["b", "c"]
