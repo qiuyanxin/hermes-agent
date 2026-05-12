@@ -46,6 +46,7 @@ from gateway.platforms.base import (
     SendResult,
     is_network_accessible,
 )
+from gateway.platforms.redis_store import EventStore, make_store_from_env
 
 logger = logging.getLogger(__name__)
 
@@ -394,6 +395,10 @@ class APIServerAdapter(BasePlatformAdapter):
         self._run_streams: Dict[str, "asyncio.Queue[Optional[Dict]]"] = {}
         # Creation timestamps for orphaned-run TTL sweep
         self._run_streams_created: Dict[str, float] = {}
+        # Phase A: Redis-backed event store (see ADR 0009). _run_streams remains
+        # as the legacy fallback path for code not yet migrated; Tasks 3-5 swap
+        # call sites to _store. When _store is None, code falls back to _run_streams.
+        self._store: Optional[EventStore] = None
         self._session_db: Optional[Any] = None  # Lazy-init SessionDB for session continuity
 
     @staticmethod
@@ -2376,6 +2381,7 @@ class APIServerAdapter(BasePlatformAdapter):
         try:
             mws = [mw for mw in (cors_middleware, body_limit_middleware, security_headers_middleware) if mw is not None]
             self._app = web.Application(middlewares=mws)
+            self._store = make_store_from_env()
             self._app["api_server_adapter"] = self
             self._app.router.add_get("/health", self._handle_health)
             self._app.router.add_get("/health/detailed", self._handle_health_detailed)
@@ -2472,6 +2478,12 @@ class APIServerAdapter(BasePlatformAdapter):
         if self._site:
             await self._site.stop()
             self._site = None
+        if self._store is not None:
+            try:
+                await self._store.close()
+            except Exception:
+                logger.debug("[api_server] error closing _store during teardown")
+            self._store = None
         if self._runner:
             await self._runner.cleanup()
             self._runner = None
