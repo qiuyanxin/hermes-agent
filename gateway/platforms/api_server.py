@@ -2263,13 +2263,22 @@ class APIServerAdapter(BasePlatformAdapter):
 
         async def _run_and_close():
             try:
-                agent = self._create_agent(
-                    ephemeral_system_prompt=ephemeral_system_prompt,
-                    session_id=session_id,
-                    stream_delta_callback=_text_cb,
-                    tool_progress_callback=event_cb,
-                    model_override=run_model_override,
-                    enabled_toolsets_override=run_toolsets_override,
+                # _create_agent is synchronous and heavy (config disk reads +
+                # AIAgent constructor). Run it on the thread pool so it doesn't
+                # block the event loop — otherwise N concurrent /v1/runs serialize
+                # their agent construction on the loop (~150ms each → ~2.5s for 15).
+                # Thread-safety: _ensure_session_db is eager-inited in connect()
+                # so the only shared-state race is already eliminated.
+                agent = await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    lambda: self._create_agent(
+                        ephemeral_system_prompt=ephemeral_system_prompt,
+                        session_id=session_id,
+                        stream_delta_callback=_text_cb,
+                        tool_progress_callback=event_cb,
+                        model_override=run_model_override,
+                        enabled_toolsets_override=run_toolsets_override,
+                    ),
                 )
                 def _run_sync():
                     # Mirror the chat-completions path: pass session_id as
@@ -2522,6 +2531,11 @@ class APIServerAdapter(BasePlatformAdapter):
             mws = [mw for mw in (cors_middleware, body_limit_middleware, security_headers_middleware) if mw is not None]
             self._app = web.Application(middlewares=mws)
             self._store = make_store_from_env()
+            # Eager-init the session DB once at startup so _ensure_session_db()
+            # never races when _create_agent runs concurrently in run_in_executor
+            # threads (see Change 2). Lazy check-then-act init would otherwise
+            # construct N SessionDB objects under N concurrent first-calls.
+            self._ensure_session_db()
             self._app["api_server_adapter"] = self
             self._app.router.add_get("/health", self._handle_health)
             self._app.router.add_get("/health/detailed", self._handle_health_detailed)
